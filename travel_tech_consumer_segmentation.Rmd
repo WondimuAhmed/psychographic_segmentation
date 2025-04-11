@@ -1,0 +1,515 @@
+---
+title: "Travel Tech Consumer Segmentation"
+author: "Wondimu Ahmed, Ph.D."
+date: "2021-03-23"
+output:html
+
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r load_required_packages,  include=FALSE,echo=FALSE}
+# Simplify package management using pacman
+if (!requireNamespace("pacman", quietly = TRUE)) {
+  install.packages("pacman")
+}
+pacman::p_load( tidyverse, plotly,reshape2, viridis,tidyLPA, mclust, prettydoc, psych, nnet, broom, DT)
+```
+
+
+# Project Overview
+
+The goal of this project was to *identify* and *profile* distinct market segments within the consumer base of a travel technology company to inform personalized marketing and strategic audience engagement. As the company continues to expand its reach and tailor digital experiences for a diverse audience of travelers, understanding the different types of motivation and attitudes of users is critical.
+
+The company currently serves travelers across various income levels and demographics. It offers a platform to assist with trip planning, itinerary curation, and travel budgeting. However, with increased competition in the travel tech space, the company's market research team recognized the need for more granular segmentation based on psychographic features rather than just demographic indicators.
+
+# Data Source
+
+The data for this analysis was drawn from a survey of 502 U.S.-based adult leisure travelers. As part of a broader travel behavior study, respondents completed a 23-item scale designed to assess key dimensions of travel-related attitudes and behaviors. These items reflect well-established variables in travel research, including trip planning, sustainable travel preferences, cultural awareness, and budget consciousness (See Refs 1-7). Respondents rated each item using a 5-point Likert-type scale, ranging from “Not at all important” (1) to “Extremely important” (5). Demographic information such as gender and household income was also collected.
+
+
+```{r,  load_data, echo=FALSE}
+travel_tech_data <- read.csv("travel_tech_data2.csv")
+travel_tech_demo <- travel_tech_data[, c(1:20)]
+```
+
+ 
+## Data Cleaning
+To ensure data quality, responses were excluded based on predefined quality control criteria:
+
+- _Attention Check Failures_: Respondents who did not pass embedded attention checks.
+- _Speeders_: Respondents who completed the survey in an unrealistically short time. 
+- [ _Straight-liners_ ](https://doi.org/10.1177/0894439317752406): Respondents who provided identical responses across all 23 survey items. 
+
+Following these exclusion criteria, the final analytic sample comprised 298 valid cases.
+ 
+
+```{r, attention_checks, echo=FALSE}
+# Recode attention check items and create a binary 'check_attention' variable. 
+travel_tech_data <- travel_tech_data %>%
+  mutate(check_attention = if_else(ManCheck1 == 5 & ManCheck2 == 5, 1, 0))
+
+# Keep only respondents who passed the attention check and drop 'check_attention' related columns
+travel_tech_data <- travel_tech_data %>%
+  filter(check_attention == 1) %>%
+  dplyr::select(-c(check_attention, ManCheck1, ManCheck2))
+
+```
+
+```{r, remove_speeders, echo=FALSE}
+#Speeders were identified based on their survey completion time. Respondents who completed the survey in less than 50% of the median time were considered speeders(i.e.threshold). Client opted for this threshold instead of word per minute criteria. 
+# Convert duration to minutes and filter data based on the threshold
+travel_tech_data <- travel_tech_data %>%
+  mutate(duration_minutes = duration / 60) %>%
+  filter(duration_minutes > 0.5 * median(duration_minutes)) 
+```
+
+```{r,identify_and_remove_straightliners, echo=FALSE}
+# Straightlining represents a significant risk to data quality. 
+# It occurs when respondents consistently select the same response option, 
+# often due to disengagement or rushing through the survey. 
+
+# Reorder columns with Item1 to Item23 placed in correct order[ The items were taken from a larger survey and thus the order of the 23 items is not maintained.]
+travel_tech_data <- travel_tech_data %>%
+  select(
+    -matches("^Item\\d+$"),
+    all_of(paste0("Item", 1:23))
+  )
+
+
+# Flag and remove straightliners from the original dataset
+straightliner <- travel_tech_data %>%
+  rowwise() %>%
+  mutate(
+    Std_Dev = sd(c_across(Item1:Item23)),
+    Straightliner = Std_Dev == 0 
+  ) %>%
+  ungroup()
+
+straightliner_id <- straightliner %>%
+  filter(Straightliner == TRUE) %>%
+  pull(RespondentID)
+
+travel_tech_data <- travel_tech_data %>%
+  filter(!RespondentID %in% straightliner_id)
+
+#  6 Respondents were removed 
+```
+
+# Data Analysis
+
+## Factor Analysis
+The client provided a conceptual framework outlining four key dimensions of traveler motivations and attitudes. My role as a consultant was to explore whether these dimensions were supported by the data through an exploratory factor analysis (EFA).
+
+The analysis 'confirmed' the presence of four factors:
+
+- _Trip Readiness_: Represents the importance travelers place on being organized, informed, and prepared across key logistical and safety-related aspects of travel. It reflects pre-trip planning priorities and a traveler’s desire for control, clarity, and peace of mind throughout the travel experience.
+
+
+- _Sustainable Travel_: Describes the value travelers assign to making environmentally responsible choices, particularly regarding accommodation and transportation. It indicates how much sustainability considerations influence their travel planning and decision-making.
+
+
+- _Cultural Awareness_: Captures the degree to which travelers value cultural knowledge and immersion when preparing for a destination. It underscores the importance of understanding and appreciating the history, customs, and heritage of the places travelers visit.
+
+
+- _Budget Consciousness_:  Refers to the extent to which travelers value financial discipline and cost efficiency when making travel decisions. It emphasizes the importance of staying within budget, avoiding unnecessary expenses, and selecting low-cost options during trips.
+
+
+Composite scores for each factor were computed and used as psychographic indicators in downstream cluster analysis.
+
+```{r, change_col_names, results='hide',fig.show='hide',echo=FALSE}
+travel_tech_items <- travel_tech_data[, c(1, 20:42)]
+names(travel_tech_items)
+
+fa_data <- travel_tech_items %>%
+  select(RespondentID, starts_with("Item"))
+names(fa_data)
+
+fa_data <- fa_data %>%
+  select(-RespondentID) %>%
+  mutate(across(everything(), as.numeric))
+
+  # Prior to analysis the dataset was evaluated to check if it is suitable for factor analysis [factorability] using  Kaiser-Meyer-Olkin (KMO) measure of sampling adequacy and Bartlett’s test of sphericity.
+
+# Bartlett’s Test of Sphericity: χ²(253) = 3133.93, p < .001, indicates that the correlation matrix is suitable for factor analysis
+
+cortest.bartlett(cor(fa_data), n = nrow(fa_data)) 
+
+
+# Kaiser-Meyer-Olkin (KMO) Measure of sampling adequacy: Overall MSA  of 0.88 indicates excellent factorability of the dataset. 
+
+KMO(fa_data)
+
+# Scree plot, parallel analysis, and Velicer’s Minimum Average Partial (MAP) test were used to determine the optimal number of factors.
+# All criteria supported a 4-factor solution.
+
+
+fa.parallel(fa_data, fa = "fa", n.iter = 100, show.legend = TRUE, main = "Parallel Analysis for Survey Items")
+
+vss_criteria <- VSS(fa_data, n = 10, rotate = "oblimin", fm = "ml")
+
+vss_criteria 
+```
+
+```{r, factor_analysis, results='hide',fig.show='hide',echo=FALSE}
+# Run factor analysis with 4 factors and oblimin rotation ( we expect factors to correlate)
+# This result aligned with the client’s theoretical framework and was selected for the final analysis [see below].
+
+fa_solution <- fa(fa_data, nfactors = 4, rotate = "oblimin", fm = "ml") 
+
+# plot the factor diagram
+colnames(fa_solution$loadings)<- c("Factor 1","Factor 2","Factor 3","Factor 4")
+fa.diagram(fa_solution)
+
+summary(fa_solution)
+
+fa_solution$Vaccounted #  Proportion of variance explained from 13% to 40%; and the total variance explained by all four factors is 52%
+
+```
+
+
+```{r, calculate_reliability_and_factor_means, echo=FALSE, results='hide',fig.show='hide'}
+
+# Set items list per factor 
+F1_items <- c("Item16", "Item8", "Item11", "Item19", "Item5", "Item1", "Item9", "Item6", "Item23", "Item7", "Item15")
+F2_items <- c("Item2", "Item20", "Item13", "Item4")
+F3_items <- c("Item22", "Item10", "Item21", "Item18", "Item3")
+F4_items <- c("Item14", "Item12", "Item17")
+
+# Calculate raw alpha for all sub-scales. Because same metric is used across the sub-scales no need to use standardized alpha.
+
+dimensions_list <- list(
+  TripReadiness = F1_items,
+  SustainableTravel = F2_items,
+  CulturalAwareness = F3_items,
+  BudgetConsciousness = F4_items
+)
+
+dimensions_alphas <- lapply(dimensions_list, function(items) {
+  alpha(travel_tech_items[, items])$total$raw_alpha
+})
+
+dimensions_alphas  # Cronbach's alpha results: Trip Readiness = .89, Sustainable Travel = .90, Cultural Awareness = .83, Budget Consciousness = .70
+
+# Compute mean scores for each psychographic factor based on relevant item groupings
+travel_tech_seg_data <- travel_tech_items %>%
+  rowwise() %>%
+  mutate(
+    Trip_Readiness = mean(c_across(all_of(F1_items)), na.rm = TRUE),
+    Sustainable_Travel = mean(c_across(all_of(F2_items)), na.rm = TRUE),
+    Cultural_Awareness = mean(c_across(all_of(F3_items)), na.rm = TRUE),
+    Budget_Consciousness = mean(c_across(all_of(F4_items)), na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+
+```
+
+
+## Model-based Clustering 
+
+[Model-based clustering](https://doi.org/10.1146/annurev-statistics-033121-115326) —specifically Latent Profile Analysis (LPA) [1](https://cran.r-project.org/web/packages/mclust/index.html) & [2](https://cran.r-project.org/web/packages/tidyLPA/index.html)—was used to identify naturally occurring segments of travelers based on their psychographic characteristics. The results revealed a clear and interpretable three-segment solution, with each segment demonstrating distinct patterns across key psychographic dimensions of trip readiness, cultural awareness, sustainability orientation, and budget consciousness[see source code for more info](.
+
+This solution revealed a baseline segment(Spontaneous Explorers,22.6%) with low scores across most psychographic dimensions. In contrast, a second class(Intentional Explorers) consisting of 23.6% of participants exhibited high values in all dimensions reflecting a values-driven approach to travel. Interestingly, the largest segment (Practical Travelers, 53.8% )fell into a third class characterized by moderate budget consciousness suggesting a practical, efficiency-minded orientation. 
+
+
+
+```{r, model_based_culstering1, echo=FALSE, results='hide',fig.show='hide'}
+# Model-based clustering using the Mclust package with the EEI model (equal volume, equal shape, axis-aligned clusters) # There are over 14 models but in this analysis we chose  the simplest one. 
+
+myclust_1_9BIC <- mclustBIC(travel_tech_seg_data[, 25:28],  modelNames = "EEI") # Computed BIC values for 1 to 9 cluster solutions to identify the optimal number of latent classes
+
+summary(myclust_1_9BIC)
+
+myclust_1_9 <- Mclust(travel_tech_seg_data[, 25:28],  modelNames = "EEI") # , 
+
+summary(myclust_1_9)
+
+myclust_1_9$parameters
+
+# Visualizations: the BIC curve (for model comparison) and the classification plot (for segment assignment)
+
+plot(myclust_1_9$BIC)
+
+plot(myclust_1_9, what = "classification")
+```
+
+
+```{r, model_based_culstering2, results='hide', fig.show='hide', echo=FALSE}
+
+# Latent Profile Analysis (LPA) using tidyLPA on four psychographic dimensions (columns 25:28)
+# Step 1: Fit models with 1 to 9 latent profiles and compare solutions using AIC and BIC
+# Step 2: Save fit statistics for review and documentation
+# Step 3: Based on model comparison, a 3-profile solution (model = 1: equal variance, equal covariance) was estimated using scaled data
+# Step 4: Extract class membership data and append it to the original dataset for downstream analysis
+Mymodel <- (travel_tech_seg_data[, 25:28] %>%
+  estimate_profiles(1:9) %>%
+  compare_solutions(statistics = c("AIC", "BIC")))
+
+# Save the fit indices of 1-9 models
+write.csv(Mymodel$fits, file = "FitIndicesfor1-9LPA.csv")
+
+Mymodel1 <- travel_tech_seg_data[, 25:28] %>%
+  scale() %>%
+  estimate_profiles(3, 
+                    models = 1
+  )
+
+class_data <- get_data(Mymodel1)
+
+travel_tech_seg_data <- bind_cols(travel_tech_seg_data, class_data[, c(10)])
+```
+
+```{r, prepare_plot_data, results='hide',fig.show='hide', echo=FALSE}
+plot_data1 <- Mymodel$fits
+plot_data1 <- as.data.frame(plot_data1)
+# plot_data$Classes<--as.factor(plot_data$Classes)
+myplotBIC <- ggplot(data = plot_data1, aes(x = Classes, group = 1)) +
+  geom_line(aes(y = BIC)) +
+  geom_line(aes(y = AIC))
+# myplotBIC1
+
+# ggplotly(myplotBIC)
+criteria_plot_data <- plot_data1[, c(2, 6, 4)]
+criteria_plot_data <- melt(criteria_plot_data, id.vars = "Classes")
+criteria_plot_data <- criteria_plot_data %>%
+  dplyr::rename(Criteria = variable)
+
+
+criteria_plot <- criteria_plot_data %>%
+  ggplot(aes(x = Classes, y = value, group = Criteria, color = Criteria)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:9) + # ← this line sets x-axis ticks from 1 to 9
+  ggtitle("Plot of Information Criteria for Class Ennumeration") +
+  ylab("Value") +
+  xlab("Number of Classes")
+criteria_plot
+```
+
+
+```{r, echo=FALSE}
+plot_data2 <- get_estimates(Mymodel1) %>%
+  # Prepare and clean the data
+  mutate(
+    Value = Estimate,
+    Variable = Parameter, # Rename "Parameter" to "Variable"
+    Class = ordered(Class)
+  ) %>%
+  filter(grepl("(^Means$|^Variances$)", Category)) %>%
+  dplyr::select(-c(p, Parameter, Estimate)) %>%
+  # Reshape to wide format
+  mutate(idvar = paste0(Model, Classes, Class, Variable)) %>%
+  pivot_wider(
+    names_from = Category,
+    values_from = c(Value, se)
+  ) %>%
+  mutate(Mean = round(Value_Means, 2)) %>% # Final adjustments: calculate Mean, drop unwanted columns
+  dplyr::select(Class, Variable, Mean)
+
+# Rename latent classes
+class_plot_data <- plot_data2 %>%
+  dplyr::mutate(Class = case_when(
+    Class == "1" ~ "Intentional Explorers",
+    Class == "2" ~ "Practical Travelers",
+    Class == "3" ~ "Spontaneous Explorers",
+    TRUE ~ Class # Keeps any unmatched values unchanged
+  ))
+
+```
+
+
+
+
+
+``` {r, echo=FALSE}
+Myplot3 <- ggplot(data = class_plot_data, aes(x = Class, y = Mean, fill = Variable, )) +
+  geom_bar(stat = "identity", position = position_dodge(), colour = "black")
+
+Myplot3 <- Myplot3 + scale_fill_manual(values = c("#0073C2FF", "#C000FF", "#00FF00", "#FF0000")) +
+  ggtitle("Market Segments of Travelers") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(size = 10, face = "bold")
+  ) + labs(x = "", y = "Standardized Mean Values") # Latent Class"
+```
+
+```{r, final_plot, echo=FALSE}
+Myplot4 <- Myplot3 +
+  scale_fill_discrete(name = "Psychographic Variables", labels = c("Trip Readiness", "Sustainable Travel", "Cultural Awareness", "Budget Consciousness")) # name = "Outcomes",
+Myplot4 # scale_y_continuous(breaks = seq(0, 5, by = 0.5))
+```
+
+
+```{r final_plot_withplot.background, results='hide',fig.show='hide',echo=FALSE}
+Myplot5 <- Myplot4 + theme(plot.background = element_rect(color = "purple", linewidth = 5))
+Myplot5
+```
+
+This analysis underscores the need for targeted strategies: while a meaningful portion of users seeks immersive, ethical experiences, the majority prioritize affordability and planning ease.
+
+```{r pie_chart, results='hide',fig.show='hide',echo=FALSE}
+
+# Create pie chart for market segments
+pie_chart <- ggplot(
+  travel_tech_seg_data %>%
+    count(Class) %>%
+    mutate(
+      Class = as.factor(Class),
+      Percentage = round(n / sum(n) * 100, 1),
+      Label = paste0(Percentage, "%")
+    ),
+  aes(x = "", y = n, fill = Class)
+) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  geom_text(
+    aes(label = Label),
+    position = position_stack(vjust = 0.5),
+    size = 4,
+    color = "black"
+  ) +
+  scale_fill_manual(values = c("red", "deepskyblue", "limegreen")) +
+  scale_fill_discrete(name = "Segements", labels = c("Intentional Explorers", "Practical Travelers", "Spontaneous Explorers")) +  
+
+  labs(title = "Travel Tech Consumer Segments") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold")
+  )
+pie_chart
+```
+
+
+
+
+## Profiling
+
+A multinomial logistic regression was conducted to evaluate whether demographic variables predicted segment membership. Based on the established significance threshold (p < .05), neither gender nor income emerged as a statistically significant predictor( See Table below). The finding suggests that traveler segmentation is more likely driven by mindset and behavioral priorities than by demographic characteristics alone. This underscores the value of a psychographic approach in understanding and engaging distinct traveler segments.
+
+
+```{r,  recode_demographic_data, echo=FALSE}
+# Recode income based on Client's request. 
+travel_tech_demo <- travel_tech_demo %>%
+  dplyr::mutate(Household.Income.Category = case_when(
+    Household.Income %in% c("Less than $15,000", "$15,000 - $24,999", "$25,000 - $49,999") ~ "Low Income",
+    Household.Income %in% c("$50,000 - $74,999", "$75,000 - $99,999") ~ "Middle Income",
+    Household.Income %in% c("$100,000 - $149,999", "$150,000 - $199,999", "$200,000 - $249,999", "$250,000 or greater") ~ "High Income",
+    TRUE ~ NA # Prefer not to answer treated as NA
+  ))
+
+# Use segment labels instead of default Class var.
+travel_tech_seg_data <- travel_tech_seg_data %>%
+  dplyr::mutate(Class = case_when(
+    Class == 1 ~ "Intentional Explorers",
+    Class == 2 ~ "Practical Travelers",
+    Class == 3 ~ "Spontaneous Explorers"
+  ))
+
+
+# Get data from best model and merge with demo data for profiling
+travel_tech_seg_data <- left_join(travel_tech_seg_data, travel_tech_demo, by = "RespondentID")
+
+# Check the recoded data
+# table(mydata_demo$Household.Income.Category)
+```
+
+
+```{r, profile_fit1,results='hide', message=FALSE, warning=FALSE , echo=FALSE}
+# multinomial logistic regression ipredicting class membership 
+profile_fit <- multinom(
+  Class ~ Gender
+    + Household.Income.Category,
+  data = travel_tech_seg_data
+)
+# Create a tidy table [ tidy is from broom package]
+multinom_reg_table <- tidy(profile_fit, conf.int = TRUE, trace = FALSE)
+```
+
+
+```{r, profile_fit_final, message=FALSE, echo=FALSE }
+# Rename columns and round numeric values for ease of presentation 
+multinom_reg_table<- multinom_reg_table%>%
+  rename(
+    `Cluster Membership` = y.level,
+    Variable = term,
+    Estimate = estimate,
+    `Std. Error` = std.error,
+    Statistic = statistic,
+    `P Value` = p.value,
+    `Conf. Low` = conf.low,
+    `Conf. High` = conf.high
+  ) %>%
+  mutate(Variable = recode(Variable,
+    `(Intercept)` = "Intercept",
+    `GenderMale` = "Male",
+    `Household.Income.CategoryLow Income` = "Low Income",
+    `Household.Income.CategoryMiddle Income` = "Middle Income"
+  )) %>%
+  mutate(
+    across(where(is.numeric), ~ round(.x, 3))
+  )
+# Create an HTML widget using datatable  from DT package 
+datatable(multinom_reg_table, options = list(pageLength = 12))
+
+
+
+
+```
+
+# Insights Summary
+
+The segmentation analysis identified three distinct traveler segments. These segments represent meaningful differences in planning behavior, values, and travel priorities:
+
+- **Intentional Explorers**: Highly engaged travelers who prioritize preparation, cultural immersion, eco-conscious choices, and financial discipline. 
+
+- **Practical Travelers**: Practical and cost-efficient travelers who focus on budgeting and essential planning. They are less motivated by cultural or sustainability concerns.
+
+- **Spontaneous Explorers**: Low-engagement users with minimal interest in planning, budgeting, or values-based travel. They prefer simplicity and convenience, making them ideal candidates for pre-curated or perhaps automated travel solutions.
+
+
+
+
+
+# Reccomendations 
+* Offer customizable planning tools and eco-cultural content for Intentional Explorers.
+* Focus on budget features, deal-finders, and streamlined booking flows for Practical Travelers.
+* Deliver AI-powered, low-effort itineraries for Spontaneous Explorers with minimal decision points.
+* Use value-driven messaging for Intentional Explorers.
+* Highlight simplicity and savings for Practical Travelers.
+* Emphasize ease and spontaneity for Spontaneous Explorers.
+
+
+
+
+# References
+
+1. Falk, M., & Katz-Gerro, T. (2017). Modeling travel decisions: Urban exploration, cultural immersion, or both?. _Journal of Travel & Tourism Marketing_, 34(3), 369-382.
+
+2. Gehlert, T., Dziekan, K., & Gärling, T. (2013). Psychology of sustainable travel behavior. _Transportation Research Part A: Policy and Practice_, 48, 19-24.
+3. Pearce, P. L., & Lee, U.I. (2005). Developing the Travel Career Approach to Tourist Motivation. _Journal of Travel Research_, 43(3), 226-237. https://doi.org/10.1177/0047287504272020 (Original work published 2005)
+
+4. Richards, G. (2002). Tourism attraction systems: Exploring cultural behavior. _Annals of Tourism Research_, 29(4), 1048-1064.
+
+4. Shi, S., Gong, Y., & Gursoy, D. (2021). Antecedents of trust and adoption intention toward artificially intelligent recommendation systems in travel planning: a heuristic–systematic model. _Journal of Travel Research_, 60(8), 1714-1734.
+
+5. Xiang, Z., Wang, D., O’Leary, J. T., & Fesenmaier, D. R. (2015). Adapting to the internet: trends in travelers’ use of the web for trip planning. _Journal of Travel Research_, 54(4), 511-527.
+
+6. Xie, J., Zhang, K., Chen, J., Zhu, T., Lou, R., Tian, Y., ... & Su, Y. (2024). Travelplanner: A benchmark for real-world planning with language agents. _arXiv preprint_ arXiv:2402.01622.
+
+
+
+
+
+<a href="#page-title" style="font-size: 20px; font-weight: bold; color: white; position: fixed; right: 20px; bottom: 20px; background-color: red; padding: 10px 15px; border-radius: 5px; box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2); text-decoration: none;">
+    Back to Top
+</a>
+
+
+
+<a href="https://wondimuahmed.github.io/Portfolio/" style="font-size: 20px; font-weight: bold; color:white; position: fixed; left: 20%; bottom: 20px; background-color: #007BFF; padding: 10px 15px; border-radius: 5px; box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2); text-decoration: none;">
+    Back to Portfolio
+</a>
