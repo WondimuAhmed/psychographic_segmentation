@@ -3,7 +3,7 @@
 
 ## Overview
 
-This project analyzes psychographic segments among U.S. leisure
+[This project](https://wondimuahmed.github.io/psychographic_segmentation/) analyzes psychographic segments among U.S. leisure
 travelers to help a travel tech company personalize offerings and
 improve marketing strategies.
 
