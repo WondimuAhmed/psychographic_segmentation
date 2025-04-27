@@ -3,9 +3,8 @@
 
 ## Overview
 
-[This project](https://wondimuahmed.github.io/psychographic_segmentation/) analyzes psychographic segments among U.S. leisure
-travelers to help a travel tech company personalize offerings and
-improve marketing strategies.
+[This project](https://wondimuahmed.github.io/psychographic_segmentation/) uses model-based clustering to identify psychographic segments among U.S. leisure
+travelers to help a travel tech company personalize offerings and improve marketing strategies.
 
 ## Objectives
 
